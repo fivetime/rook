@@ -344,7 +344,7 @@ func (r *ReconcileCephNVMeOFGateway) upCephNVMeOFGateway(cephNVMeOFGateway *ceph
 			return errors.Wrapf(err, "failed to set owner reference for deployment %q", deployment.Name)
 		}
 
-		_, err = k8sutil.CreateOrUpdateDeployment(r.opManagerContext, r.context.Clientset, deployment)
+		err = r.createOrUpdateDeployment(cephNVMeOFGateway, deployment)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create/update deployment for %q", daemonID)
 		}

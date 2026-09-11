@@ -121,6 +121,8 @@ func TestDeploymentSpec(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotEmpty(t, d.Spec.Template.Annotations)
 		assert.Equal(t, configHash, d.Spec.Template.Annotations["config-hash"])
+		assert.Equal(t, "Recreate", string(d.Spec.Strategy.Type))
+		assert.Nil(t, d.Spec.Strategy.RollingUpdate)
 
 		// Verify deployment labels contain Ceph requirements
 		daemonID := nvmeof.Name + "-0"

@@ -188,6 +188,8 @@ func TestCephNVMeOFGatewayController(t *testing.T) {
 		return &version.Squid, &version.Squid, nil
 	}
 
+	updatedDeployments := stubUpdateDeploymentAndWait(t)
+
 	t.Run("error - no ceph cluster", func(t *testing.T) {
 		cCtx := newContext(baseExecutor())
 		cl := newControllerClient(baseCephNVMeOFGateway())
@@ -315,19 +317,25 @@ func TestCephNVMeOFGatewayController(t *testing.T) {
 		r := newReconcile(cCtx, cl)
 
 		t.Run("initial reconcile", func(t *testing.T) {
+			*updatedDeployments = nil
 			res, err := r.Reconcile(ctx, req)
 			assert.NoError(t, err)
 			assert.Equal(t, res.RequeueAfter, time.Duration(0))
 			assertCephNVMeOFGatewayReady(t, r)
 			assertResourcesExist(t, cCtx, "rook-ceph-nvmeof-my-nvmeof-a", "rook-ceph-nvmeof-my-nvmeof-b", "rook-ceph-nvmeof-my-nvmeof-c")
+			// new deployments are created, not updated
+			assert.Empty(t, *updatedDeployments)
 		})
 
 		t.Run("double reconcile", func(t *testing.T) {
+			*updatedDeployments = nil
 			res, err := r.Reconcile(ctx, req)
 			assert.NoError(t, err)
 			assert.Equal(t, res.RequeueAfter, time.Duration(0))
 			assertCephNVMeOFGatewayReady(t, r)
 			assertResourcesExist(t, cCtx, "rook-ceph-nvmeof-my-nvmeof-a", "rook-ceph-nvmeof-my-nvmeof-b", "rook-ceph-nvmeof-my-nvmeof-c")
+			// existing gateways go through the one-at-a-time update, in order
+			assert.Equal(t, []string{"rook-ceph-nvmeof-my-nvmeof-a", "rook-ceph-nvmeof-my-nvmeof-b", "rook-ceph-nvmeof-my-nvmeof-c"}, *updatedDeployments)
 		})
 	})
 
@@ -456,6 +464,7 @@ func TestNVMeOFKeyRotation(t *testing.T) {
 	currentAndDesiredCephVersion = func(ctx context.Context, rookImage string, namespace string, jobName string, ownerInfo *k8sutil.OwnerInfo, context *clusterd.Context, cephClusterSpec *cephv1.ClusterSpec, clusterInfo *cephclient.ClusterInfo) (*version.CephVersion, *version.CephVersion, error) {
 		return &version.CephVersion{Major: 20, Minor: 2, Extra: 0}, &version.CephVersion{Major: 20, Minor: 2, Extra: 0}, nil
 	}
+	stubUpdateDeploymentAndWait(t)
 
 	nvmeof := &cephv1.CephNVMeOFGateway{
 		ObjectMeta: metav1.ObjectMeta{

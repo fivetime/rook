@@ -252,6 +252,12 @@ func (r *ReconcileCephNVMeOFGateway) makeDeployment(nvmeof *cephv1.CephNVMeOFGat
 		Selector:             &metav1.LabelSelector{MatchLabels: getLabels(nvmeof, daemonID)},
 		Template:             podTemplateSpec,
 		Replicas:             &replicas,
+		// The old and new pod register under the same gateway name, and with host networking a
+		// surge pod can never be scheduled next to the old one because the ports are taken.
+		// Replace the pod instead; upCephNVMeOFGateway updates one gateway at a time.
+		Strategy: apps.DeploymentStrategy{
+			Type: apps.RecreateDeploymentStrategyType,
+		},
 	}
 
 	return deployment, nil
