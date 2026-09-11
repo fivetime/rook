@@ -461,6 +461,20 @@ func TestConfigureModules(t *testing.T) {
 	assert.Equal(t, 1, modulesEnabled, "rook module should be enabled on Ceph v20.2.5")
 	assert.Equal(t, 0, modulesDisabled)
 	assert.Equal(t, "rook", lastModuleConfigured)
+
+	// rook module follows the spec on v20.2.4 when the image carries the crash fix
+	modulesEnabled = 0
+	modulesDisabled = 0
+	lastModuleConfigured = ""
+	c.clusterInfo.CephVersion = cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}
+	c.spec.CephVersion.Image = "ghcr.io/fivetime/ceph:v20.2.4-fivetime-201f4994d34f"
+	c.spec.Mgr.Modules = []cephv1.Module{
+		{Name: "rook", Enabled: true},
+	}
+	assert.NoError(t, c.configureMgrModules())
+	assert.Equal(t, 1, modulesEnabled, "rook module should be enabled on the fivetime v20.2.4 image")
+	assert.Equal(t, 0, modulesDisabled)
+	assert.Equal(t, "rook", lastModuleConfigured)
 }
 
 func TestRookModuleDisabledForCephVersion(t *testing.T) {
@@ -468,22 +482,37 @@ func TestRookModuleDisabledForCephVersion(t *testing.T) {
 		clusterInfo: cephclient.AdminTestClusterInfo("test"),
 	}
 
+	const (
+		upstream = "quay.io/ceph/ceph:v20.2.4"
+		fivetime = "ghcr.io/fivetime/ceph:v20.2.4-fivetime-201f4994d34f"
+	)
+
 	tests := []struct {
 		version  cephver.CephVersion
+		image    string
 		disabled bool
 	}{
-		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 1}, false},
-		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 2}, true},
-		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 3}, true},
-		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, true},
-		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 5}, false},
-		{cephver.CephVersion{Major: 19, Minor: 2, Extra: 3}, false},
-		{cephver.CephVersion{Major: 20, Minor: 1, Extra: 3}, false},
-		{cephver.CephVersion{Major: 21, Minor: 0, Extra: 0}, false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 1}, upstream, false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 2}, upstream, true},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 3}, upstream, true},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, upstream, true},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 5}, upstream, false},
+		{cephver.CephVersion{Major: 19, Minor: 2, Extra: 3}, upstream, false},
+		{cephver.CephVersion{Major: 20, Minor: 1, Extra: 3}, upstream, false},
+		{cephver.CephVersion{Major: 21, Minor: 0, Extra: 0}, upstream, false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, "", true},
+		// the fivetime image carries the crash fix, not the v20.2.2 memory leak fix
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 2}, fivetime, true},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 3}, fivetime, false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, fivetime, false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, "ghcr.io/fivetime/ceph@sha256:0123456789abcdef", false},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, "ghcr.io/fivetime/ceph-other:v20.2.4", true},
+		{cephver.CephVersion{Major: 20, Minor: 2, Extra: 4}, "docker.io/fivetime/ceph:v20.2.4", true},
 	}
 	for _, tt := range tests {
 		c.clusterInfo.CephVersion = tt.version
-		assert.Equal(t, tt.disabled, c.rookModuleDisabledForCephVersion(), "version: %s", tt.version.String())
+		c.spec.CephVersion.Image = tt.image
+		assert.Equal(t, tt.disabled, c.rookModuleDisabledForCephVersion(), "version: %s image: %q", tt.version.String(), tt.image)
 	}
 }
 

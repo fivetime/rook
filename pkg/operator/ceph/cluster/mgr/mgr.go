@@ -492,6 +492,10 @@ func (c *Cluster) rookModuleDisabledForCephVersion() bool {
 	if v.Major != 20 || v.Minor != 2 {
 		return false
 	}
+	// The crash is fixed in the fivetime image; the v20.2.2 memory leak is not.
+	if v.Extra >= 3 && v.Extra <= 4 && cephImageHasRookModuleCrashFix(c.spec.CephVersion.Image) {
+		return false
+	}
 	return v.Extra >= 2 && v.Extra <= 4
 }
 

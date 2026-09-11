@@ -92,7 +92,7 @@ jobs:
           cache: true
 
       - name: Unit tests
-        run: go test -tags ceph_preview ./pkg/operator/ceph/nvmeof/... ./pkg/operator/k8sutil/...
+        run: go test -tags ceph_preview ./pkg/operator/ceph/nvmeof/... ./pkg/operator/k8sutil/... ./pkg/operator/ceph/cluster/mgr/...
 
       # Flags follow the upstream Makefile: CGO off, ceph_preview tag, stripped, and the
       # version string left at the upstream release. The rook-version label on every
@@ -142,6 +142,7 @@ jobs:
             test \"\$(sha256sum /usr/local/bin/rook | cut -d' ' -f1)\" = '${want}'
             test \"\$(id -u)\" = 2016
             grep -aq 'nvmeof gateways did not converge within' /usr/local/bin/rook
+            grep -aq 'ghcr.io/fivetime/ceph' /usr/local/bin/rook
             rook version | grep -F '${{ steps.meta.outputs.version }}'
             test -x /usr/local/bin/toolbox.sh
             ceph --version
