@@ -288,7 +288,7 @@ func (r *ReconcileCephNVMeOFGateway) reconcileCreateCephNVMeOFGateway(cephNVMeOF
 	}
 
 	listOps := metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=%s,app.kubernetes.io/part-of=%s", k8sutil.AppAttr, AppName, cephNVMeOFGateway.Name),
+		LabelSelector: gatewayDeploymentSelector(cephNVMeOFGateway),
 	}
 	deployments, err := r.context.Clientset.AppsV1().Deployments(cephNVMeOFGateway.Namespace).List(r.opManagerContext, listOps)
 	if err != nil && !kerrors.IsNotFound(err) {

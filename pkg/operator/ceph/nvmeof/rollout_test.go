@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // stubUpdateDeploymentAndWait replaces updateDeploymentAndWait for the duration of the test and
@@ -78,6 +79,38 @@ func gatewayMap(gateways ...nvmeofGatewayState) *nvmeofGatewayMap {
 	return &nvmeofGatewayMap{Gateways: gateways}
 }
 
+// deployment returns a single-replica gateway deployment with the given strategy and status.
+func deployment(name string, strategy appsv1.DeploymentStrategyType, generation, observed int64, total, updated, ready int32) *appsv1.Deployment {
+	one := int32(1)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       name,
+			Namespace:  "rook-ceph",
+			Generation: generation,
+			Labels:     map[string]string{"app": AppName, "app.kubernetes.io/part-of": "my-nvmeof"},
+		},
+		Spec: appsv1.DeploymentSpec{Replicas: &one, Strategy: appsv1.DeploymentStrategy{Type: strategy}},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: observed, Replicas: total, UpdatedReplicas: updated, ReadyReplicas: ready,
+		},
+	}
+}
+
+func deploymentMap(deployments ...*appsv1.Deployment) map[string]*appsv1.Deployment {
+	m := map[string]*appsv1.Deployment{}
+	for _, d := range deployments {
+		m[d.Name] = d
+	}
+	return m
+}
+
+var (
+	aRolledOut   = deployment(gwA, appsv1.RecreateDeploymentStrategyType, 5, 5, 1, 1, 1)
+	bRolledOut   = deployment(gwB, appsv1.RecreateDeploymentStrategyType, 5, 5, 1, 1, 1)
+	cRolledOut   = deployment(gwC, appsv1.RecreateDeploymentStrategyType, 5, 5, 1, 1, 1)
+	allRolledOut = deploymentMap(aRolledOut, bRolledOut, cRolledOut)
+)
+
 func TestParseGatewayMap(t *testing.T) {
 	gwMap := &nvmeofGatewayMap{}
 	assert.NoError(t, json.Unmarshal([]byte(convergedGatewayMap), gwMap))
@@ -96,24 +129,59 @@ func TestParseGatewayMap(t *testing.T) {
 	assert.True(t, bFailbackToA.converged())
 }
 
+func TestDeploymentRolledOut(t *testing.T) {
+	assert.True(t, deploymentRolledOut(aRolledOut))
+	assert.False(t, deploymentRolledOut(deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 5, 1, 1, 1)), "spec not observed yet")
+	assert.False(t, deploymentRolledOut(deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 6, 0, 0, 0)), "old pod gone, new pod not created")
+	assert.False(t, deploymentRolledOut(deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 6, 1, 1, 0)), "new pod not ready")
+	assert.False(t, deploymentRolledOut(deployment(gwA, appsv1.RollingUpdateDeploymentStrategyType, 6, 6, 2, 1, 1)), "surge pod pending next to the old one")
+}
+
 func TestCheckSafeToStop(t *testing.T) {
+	converged := gatewayMap(aConverged, bConverged, cConverged)
 	tests := []struct {
-		name    string
-		gwMap   *nvmeofGatewayMap
-		target  string
-		wantErr string
+		name        string
+		gwMap       *nvmeofGatewayMap
+		deployments map[string]*appsv1.Deployment
+		target      string
+		wantErr     string
 	}{
-		{"all converged", gatewayMap(aConverged, bConverged, cConverged), gwB, ""},
-		{"other gateway covers a group for the target", gatewayMap(aDown, bCoveringForA, cConverged), gwB, gwA},
-		{"target itself is down", gatewayMap(aDown, bCoveringForA, cConverged), gwA, ""},
-		{"failback still in progress", gatewayMap(aFailingBack, bFailbackToA, cConverged), gwC, gwA},
-		{"target not registered", gatewayMap(aConverged, bConverged), gwC, ""},
-		{"other gateway not registered", gatewayMap(aConverged, bConverged), gwA, ""},
-		{"whole group broken", gatewayMap(aDown, gw(gwB, 2, "UNAVAILABLE", ""), gw(gwC, 3, "UNAVAILABLE", "")), gwB, ""},
+		{"all converged", converged, allRolledOut, gwB, ""},
+		{"other gateway covers a group for the target", gatewayMap(aDown, bCoveringForA, cConverged), allRolledOut, gwB, gwA},
+		{"target itself is down", gatewayMap(aDown, bCoveringForA, cConverged), allRolledOut, gwA, ""},
+		{"failback still in progress", gatewayMap(aFailingBack, bFailbackToA, cConverged), allRolledOut, gwC, gwA},
+		{"target not registered", gatewayMap(aConverged, bConverged), allRolledOut, gwC, ""},
+		{"other gateway not registered", gatewayMap(aConverged, bConverged), allRolledOut, gwA, ""},
+		{"whole group broken", gatewayMap(aDown, gw(gwB, 2, "UNAVAILABLE", ""), gw(gwC, 3, "UNAVAILABLE", "")), allRolledOut, gwB, ""},
+		{
+			"previous gateway still restarting although the map has not noticed",
+			converged,
+			deploymentMap(deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 6, 0, 0, 0), bRolledOut, cRolledOut),
+			gwB, "deployment \"" + gwA + "\" is still rolling out",
+		},
+		{
+			"previous gateway updated but not observed yet",
+			converged,
+			deploymentMap(deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 5, 1, 1, 1), bRolledOut, cRolledOut),
+			gwB, gwA,
+		},
+		{
+			// the state the RollingUpdate port deadlock leaves behind: not yet part of this rollout
+			"deployments still stuck on RollingUpdate are judged by the map",
+			converged,
+			deploymentMap(aRolledOut, deployment(gwB, appsv1.RollingUpdateDeploymentStrategyType, 4, 4, 2, 1, 1), deployment(gwC, appsv1.RollingUpdateDeploymentStrategyType, 2, 2, 2, 1, 1)),
+			gwB, "",
+		},
+		{
+			"target not serving is not held back by other rollouts",
+			gatewayMap(aDown, bCoveringForA, cConverged),
+			deploymentMap(aRolledOut, deployment(gwB, appsv1.RecreateDeploymentStrategyType, 6, 6, 1, 1, 0), cRolledOut),
+			gwA, "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkSafeToStop(tt.gwMap, allGateways, tt.target)
+			err := checkSafeToStop(tt.gwMap, tt.deployments, allGateways, tt.target)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
 			} else {
@@ -165,8 +233,9 @@ func TestGatewayUpdateCallback(t *testing.T) {
 	}
 
 	// newReconcile returns a reconciler whose `ceph nvme-gw show` replies with the given maps in
-	// order, repeating the last one, and a pointer to the number of calls made.
-	newReconcile := func(spec cephv1.ClusterSpec, replies ...string) (*ReconcileCephNVMeOFGateway, *int) {
+	// order, repeating the last one, and a pointer to the number of calls made. The clientset holds
+	// the given deployments.
+	newReconcile := func(spec cephv1.ClusterSpec, deployments []*appsv1.Deployment, replies ...string) (*ReconcileCephNVMeOFGateway, *int) {
 		calls := 0
 		executor := &exectest.MockExecutor{
 			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
@@ -178,50 +247,62 @@ func TestGatewayUpdateCallback(t *testing.T) {
 				return reply, nil
 			},
 		}
+		clientset := k8sfake.NewClientset()
+		for _, d := range deployments {
+			_, err := clientset.AppsV1().Deployments(d.Namespace).Create(context.TODO(), d, metav1.CreateOptions{})
+			assert.NoError(t, err)
+		}
 		return &ReconcileCephNVMeOFGateway{
-			context:          &clusterd.Context{Executor: executor},
+			context:          &clusterd.Context{Executor: executor, Clientset: clientset},
 			clusterInfo:      cephclient.AdminTestClusterInfo("rook-ceph"),
 			cephClusterSpec:  &spec,
 			opManagerContext: context.TODO(),
 		}, &calls
 	}
+	rolledOut := []*appsv1.Deployment{aRolledOut, bRolledOut, cRolledOut}
 
 	converged := mustJSON(gatewayMap(aConverged, bConverged, cConverged))
 	aDownMap := mustJSON(gatewayMap(aDown, bCoveringForA, cConverged))
 	aFailbackMap := mustJSON(gatewayMap(aFailingBack, bFailbackToA, cConverged))
 
 	t.Run("stop waits until the other gateways converge", func(t *testing.T) {
-		r, calls := newReconcile(cephv1.ClusterSpec{}, aDownMap, aFailbackMap, converged)
+		r, calls := newReconcile(cephv1.ClusterSpec{}, rolledOut, aDownMap, aFailbackMap, converged)
 		assert.NoError(t, r.gatewayUpdateCallback(nvmeof, gwB)("stop"))
 		assert.Equal(t, 3, *calls)
 	})
 
+	t.Run("stop waits while another gateway deployment is rolling out", func(t *testing.T) {
+		restarting := deployment(gwA, appsv1.RecreateDeploymentStrategyType, 6, 6, 0, 0, 0)
+		r, _ := newReconcile(cephv1.ClusterSpec{}, []*appsv1.Deployment{restarting, bRolledOut, cRolledOut}, converged)
+		assert.ErrorContains(t, r.gatewayUpdateCallback(nvmeof, gwB)("stop"), "still rolling out")
+	})
+
 	t.Run("continue waits for the restarted gateway to fail back", func(t *testing.T) {
-		r, calls := newReconcile(cephv1.ClusterSpec{}, aDownMap, aFailbackMap, converged)
+		r, calls := newReconcile(cephv1.ClusterSpec{}, rolledOut, aDownMap, aFailbackMap, converged)
 		assert.NoError(t, r.gatewayUpdateCallback(nvmeof, gwA)("continue"))
 		assert.Equal(t, 3, *calls)
 	})
 
 	t.Run("gives up after the timeout", func(t *testing.T) {
-		r, _ := newReconcile(cephv1.ClusterSpec{}, aDownMap)
+		r, _ := newReconcile(cephv1.ClusterSpec{}, rolledOut, aDownMap)
 		err := r.gatewayUpdateCallback(nvmeof, gwB)("stop")
 		assert.ErrorContains(t, err, "did not converge")
 		assert.ErrorContains(t, err, gwA)
 	})
 
 	t.Run("unparseable map is retried and reported", func(t *testing.T) {
-		r, _ := newReconcile(cephv1.ClusterSpec{}, "not json")
+		r, _ := newReconcile(cephv1.ClusterSpec{}, rolledOut, "not json")
 		assert.ErrorContains(t, r.gatewayUpdateCallback(nvmeof, gwA)("continue"), "failed to parse nvme-gw map")
 	})
 
 	t.Run("continueUpgradeAfterChecksEvenIfNotHealthy proceeds after the timeout", func(t *testing.T) {
-		r, calls := newReconcile(cephv1.ClusterSpec{ContinueUpgradeAfterChecksEvenIfNotHealthy: true}, aDownMap)
+		r, calls := newReconcile(cephv1.ClusterSpec{ContinueUpgradeAfterChecksEvenIfNotHealthy: true}, rolledOut, aDownMap)
 		assert.NoError(t, r.gatewayUpdateCallback(nvmeof, gwB)("stop"))
 		assert.Greater(t, *calls, 1)
 	})
 
 	t.Run("skipUpgradeChecks does not query ceph", func(t *testing.T) {
-		r, calls := newReconcile(cephv1.ClusterSpec{SkipUpgradeChecks: true}, aDownMap)
+		r, calls := newReconcile(cephv1.ClusterSpec{SkipUpgradeChecks: true}, rolledOut, aDownMap)
 		assert.NoError(t, r.gatewayUpdateCallback(nvmeof, gwB)("stop"))
 		assert.NoError(t, r.gatewayUpdateCallback(nvmeof, gwB)("continue"))
 		assert.Equal(t, 0, *calls)
