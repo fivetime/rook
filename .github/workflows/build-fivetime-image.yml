@@ -1,0 +1,171 @@
+# Builds the rook operator image from this branch without waiting for upstream to
+# merge and release: the upstream rook/ceph image with /usr/local/bin/rook replaced
+# by a binary built from this tree (see images/ceph/Containerfile.fivetime).
+#
+# The fork carries no tags on purpose. Pushing a v* tag here would start upstream's
+# release workflows (push-build, canary, integration suites), so the release tag the
+# branch is based on is fetched from upstream only to check ancestry.
+name: fivetime rook image
+
+on:
+  push:
+    branches: ["v1.20.6-fivetime"]
+    paths:
+      - "cmd/**"
+      - "pkg/**"
+      - "go.mod"
+      - "go.sum"
+      - "images/ceph/Containerfile.fivetime"
+      - ".github/workflows/build-fivetime-image.yml"
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "Upstream image to overlay, pinned by digest"
+        default: "docker.io/rook/ceph:v1.20.6@sha256:d84289c8df92b439d56754b0af6309d0ee81a17c001e48cce525c6d495774cf9"
+      push:
+        description: "Push to ghcr.io"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fivetime-rook-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Work out image and tags
+        id: meta
+        run: |
+          set -eu
+          base="${{ inputs.base_image }}"
+          [ -n "$base" ] || base="docker.io/rook/ceph:v1.20.6@sha256:d84289c8df92b439d56754b0af6309d0ee81a17c001e48cce525c6d495774cf9"
+          case "$base" in
+            *@sha256:*) ;;
+            *) echo "::error::base_image must be pinned by digest, got ${base}"; exit 1 ;;
+          esac
+          ref="${base%@*}"                       # docker.io/rook/ceph:v1.20.6
+          ver="${ref##*:}"                       # v1.20.6
+          sha="$(git rev-parse --short=12 HEAD)"
+          image="ghcr.io/${{ github.repository_owner }}/rook-ceph"
+          push=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.push }}" = "false" ]; then
+            push=false
+          fi
+          {
+            echo "base=$base"; echo "version=$ver"; echo "image=$image"
+            # Moving tag for humans; pinned tag for the operator deployment, where a
+            # tag that moves under you restarts the operator and the mgrs unplanned.
+            echo "moving=${image}:${ver}-fivetime"
+            echo "pinned=${image}:${ver}-fivetime-${sha}"
+            echo "push=$push"
+          } >> "$GITHUB_OUTPUT"
+
+      # workflow_dispatch can be pointed at any ref. A binary built from another
+      # release line would run against CRDs and manifests it was not written for.
+      - name: Refuse a source tree that is not based on the base image's release
+        run: |
+          set -eu
+          ver="${{ steps.meta.outputs.version }}"
+          git fetch --no-tags --filter=blob:none https://github.com/rook/rook.git "refs/tags/${ver}:refs/tags/${ver}"
+          if ! git merge-base --is-ancestor "refs/tags/${ver}" HEAD; then
+            echo "::error::${{ github.ref }} does not contain rook ${ver}; dispatch with ref=${ver}-fivetime or pass a matching base_image."
+            exit 1
+          fi
+          echo "Commits on top of ${ver}:"
+          git log --oneline "refs/tags/${ver}..HEAD"
+
+      # Same Go minor as upstream's push-build.yaml for this release.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Unit tests
+        run: go test -tags ceph_preview ./pkg/operator/ceph/nvmeof/... ./pkg/operator/k8sutil/...
+
+      # Flags follow the upstream Makefile: CGO off, ceph_preview tag, stripped, and the
+      # version string left at the upstream release. The rook-version label on every
+      # daemon deployment is taken from it, so changing it makes the operator walk all
+      # of them one at a time (about 12 minutes for 45 deployments on the 1.20.4 ->
+      # 1.20.6 upgrade) for no functional change. The image tag identifies this build.
+      - name: Build rook
+        run: |
+          set -eux
+          mkdir -p _output/fivetime
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags ceph_preview -installsuffix static \
+            -ldflags "-s -w -X github.com/rook/rook/pkg/version.Version=${{ steps.meta.outputs.version }}" \
+            -o _output/fivetime/rook ./cmd/rook
+          sha256sum _output/fivetime/rook | tee _output/rook.sha256
+
+      - name: Log in to ghcr.io
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        run: |
+          set -eux
+          docker build \
+            --platform linux/amd64 \
+            --file images/ceph/Containerfile.fivetime \
+            --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base }}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --label "org.opencontainers.image.version=${{ steps.meta.outputs.version }}-fivetime" \
+            --tag "${{ steps.meta.outputs.moving }}" \
+            --tag "${{ steps.meta.outputs.pinned }}" \
+            _output/fivetime
+
+      # Checked before pushing: the binary in the image is the one just built, it
+      # carries the nvmeof rollout change, and the base image's user is unchanged.
+      - name: Verify the built image
+        run: |
+          set -eux
+          want="$(cut -d' ' -f1 _output/rook.sha256)"
+          docker run --rm --entrypoint sh "${{ steps.meta.outputs.pinned }}" -c "
+            set -eux
+            test \"\$(sha256sum /usr/local/bin/rook | cut -d' ' -f1)\" = '${want}'
+            test \"\$(id -u)\" = 2016
+            grep -aq 'nvmeof gateways did not converge within' /usr/local/bin/rook
+            rook version | grep -F '${{ steps.meta.outputs.version }}'
+            test -x /usr/local/bin/toolbox.sh
+            ceph --version
+          "
+
+      - name: Push
+        if: steps.meta.outputs.push == 'true'
+        run: |
+          set -eux
+          docker push "${{ steps.meta.outputs.pinned }}"
+          docker push "${{ steps.meta.outputs.moving }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### fivetime rook image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| base | \`${{ steps.meta.outputs.base }}\` |"
+            echo "| pinned | \`${{ steps.meta.outputs.pinned }}\` |"
+            echo "| moving | \`${{ steps.meta.outputs.moving }}\` |"
+            echo "| pushed | ${{ steps.meta.outputs.push }} |"
+            echo
+            echo "Use the **pinned** tag in the rook-ceph-operator deployment."
+          } >> "$GITHUB_STEP_SUMMARY"

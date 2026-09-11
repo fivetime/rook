@@ -1,0 +1,11 @@
+# Upstream rook/ceph release image with only the operator binary replaced.
+#
+# Everything else in the image (the ceph base, s5cmd, toolbox.sh, monitoring and
+# external-cluster scripts) stays byte-for-byte what upstream released, so the
+# difference from upstream is exactly the commits on this branch.
+#
+# Built by .github/workflows/build-fivetime-image.yml; the build context holds
+# nothing but the rook binary.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY rook /usr/local/bin/rook
