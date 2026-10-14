@@ -317,6 +317,11 @@ func (r *ReconcileCephNVMeOFGateway) reconcileCreateCephNVMeOFGateway(cephNVMeOF
 }
 
 func (r *ReconcileCephNVMeOFGateway) upCephNVMeOFGateway(cephNVMeOFGateway *cephv1.CephNVMeOFGateway) error {
+	// Before any deployment: its pods cannot start without the Secret.
+	if err := r.ensureEncryptionKeySecret(cephNVMeOFGateway); err != nil {
+		return err
+	}
+
 	for i := 0; i < cephNVMeOFGateway.Spec.Instances; i++ {
 		daemonID := k8sutil.IndexToName(i)
 

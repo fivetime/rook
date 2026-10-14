@@ -179,8 +179,9 @@ func (r *ReconcileCephNVMeOFGateway) makeDeployment(nvmeof *cephv1.CephNVMeOFGat
 
 	cephConfigVol, cephConfigMount := controller.ConfGeneratedInPodVolumeAndMount()
 	gatewayConfigVol, gatewayConfigMount := gatewayConfigVolumeAndMount(configMapName)
+	encryptionKeyVol, encryptionKeyMount := encryptionKeyVolumeAndMount(nvmeof)
 
-	initContainer := r.createCephConfigInitContainer(nvmeof, daemonID, gatewayConfigMount)
+	initContainer := r.createCephConfigInitContainer(nvmeof, daemonID, gatewayConfigMount, encryptionKeyMount)
 	daemonContainer, err := r.daemonContainer(nvmeof, cephConfigMount)
 	if err != nil {
 		return nil, err
@@ -199,6 +200,7 @@ func (r *ReconcileCephNVMeOFGateway) makeDeployment(nvmeof *cephv1.CephNVMeOFGat
 			cephConfigVol,
 			adminKeyringVolume(),
 			gatewayConfigVol,
+			encryptionKeyVol,
 		},
 		HostNetwork:        hostNetwork,
 		PriorityClassName:  nvmeof.Spec.PriorityClassName,
@@ -281,9 +283,10 @@ func getDefaultNVMeOFPlacement() cephv1.Placement {
 }
 
 // createCephConfigInitContainer creates a minimal init container that generates
-// /etc/ceph/ceph.conf, copies the admin keyring, and copies nvmeof.conf from the ConfigMap.
+// /etc/ceph/ceph.conf, copies the admin keyring and the encryption key, and copies nvmeof.conf
+// from the ConfigMap.
 // This is needed for the gateway to connect to the Ceph cluster.
-func (r *ReconcileCephNVMeOFGateway) createCephConfigInitContainer(nvmeof *cephv1.CephNVMeOFGateway, daemonID string, gatewayConfigMount v1.VolumeMount) v1.Container {
+func (r *ReconcileCephNVMeOFGateway) createCephConfigInitContainer(nvmeof *cephv1.CephNVMeOFGateway, daemonID string, gatewayConfigMount, encryptionKeyMount v1.VolumeMount) v1.Container {
 	_, cephConfigMount := controller.ConfGeneratedInPodVolumeAndMount()
 
 	cephImage := r.cephClusterSpec.CephVersion.Image
@@ -343,6 +346,7 @@ func (r *ReconcileCephNVMeOFGateway) createCephConfigInitContainer(nvmeof *cephv
 			adminKeyringVolumeMount(),
 			cephConfigMount,
 			gatewayConfigMount,
+			encryptionKeyMount,
 		},
 		Resources: nvmeof.Spec.Resources,
 		SecurityContext: &v1.SecurityContext{

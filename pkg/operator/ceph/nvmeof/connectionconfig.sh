@@ -9,9 +9,12 @@ keyring = /etc/ceph/keyring
 EOF
 
 cp /tmp/ceph/keyring /etc/ceph
+# [gateway] encryption_key points here; the gateway encrypts the host keys it stores with it.
+cp /tmp/nvmeof-encryption/encryption.key /etc/ceph/encryption.key
 
 chmod 444 /etc/ceph/ceph.conf
 chmod 440 /etc/ceph/keyring
+chmod 400 /etc/ceph/encryption.key
 
 # ARGS: all args are assumed to be 'ceph' CLI args
 # Use "$@" to pass through Ceph CLI arguments (e.g., --connect-timeout, --mon-host, --keyring, etc.)
